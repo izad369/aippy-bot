@@ -32,8 +32,8 @@ const SYSTEM_PROMPT = [
   'Rules: no politics, no NSFW, no dangerous content, never reveal keys or tokens.',
 ].join('\n');
 
-const AI_MODEL = '@cf/meta/llama-3.1-8b-instruct';
-const FLUX_MODEL = '@cf/black-forest-labs/flux-1-schnell'; // free image engine on Workers AI
+const AI_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast'; // llama-3.1-8b was deprecated by Cloudflare (2026-05-30); 3.3-70b is stronger + better Persian
+const FLUX_MODEL = '@cf/black-forest-labs/flux-1-schnell'; // confirmed live via /debug probe (2026-10)
 
 const COMMANDS = [
   {
@@ -209,6 +209,60 @@ export default {
       } catch (e) {
         return new Response('❌ ' + e.message, { status: 500 });
       }
+    }
+
+    // temporary diagnostics (no secrets exposed)
+    if (req.method === 'GET' && url.pathname === '/debug') {
+      const r = {
+        appSet: !!env.DISCORD_APP_ID,
+        pkLen: (env.DISCORD_PUBLIC_KEY || '').length,
+        tokLen: (env.DISCORD_BOT_TOKEN || '').length,
+        aiBinding: !!env.AI,
+      };
+      const t0all = Date.now();
+      // ?probe=<model>&kind=chat|img → test a single model (cheap, one per request)
+      const probe = url.searchParams.get('probe');
+      const kind = url.searchParams.get('kind') || 'chat';
+      if (probe) {
+        const t0 = Date.now();
+        try {
+          if (kind === 'img') {
+            const out = await env.AI.run(probe, { prompt: 'a red apple on a wooden table', steps: 2 });
+            const b64 = out && out.image;
+            return json({ m: probe, kind, ok: !!b64 && String(b64).length > 100, ms: Date.now() - t0, kb: b64 ? Math.round(String(b64).length / 1024) : 0 });
+          }
+          const out = await env.AI.run(probe, { messages: [{ role: 'user', content: 'Reply with exactly: OK' }], max_tokens: 10 });
+          const txt = String((out && (out.response || (out.result && out.result.response))) || '').trim();
+          return json({ m: probe, kind, ok: txt.length > 0, ms: Date.now() - t0, sample: clip(txt, 20) });
+        } catch (e) {
+          return json({ m: probe, kind, ok: false, ms: Date.now() - t0, err: String(e && e.message ? e.message : e).slice(0, 120) });
+        }
+      }
+      // default: health of the currently configured models
+      const t0 = Date.now();
+      try {
+        const out = await env.AI.run(AI_MODEL, { messages: [{ role: 'system', content: 'You are Aippy Bot. Reply with exactly: OK' }, { role: 'user', content: 'ping' }], max_tokens: 20 });
+        r.aiOk = true;
+        r.aiMs = Date.now() - t0;
+        r.aiSample = clip(String((out && (out.response || (out.result && out.result.response))) || '').slice(0, 40), 40);
+      } catch (e) {
+        r.aiOk = false;
+        r.aiMs = Date.now() - t0;
+        r.aiErr = String(e && e.message ? e.message : e).slice(0, 200);
+      }
+      r.totalMs = Date.now() - t0all;
+      // probe the followup webhook path with a dummy token (status code only, no secret leak)
+      try {
+        const probeRes = await fetch(`${API}/webhooks/${env.DISCORD_APP_ID}/00000000000000000000/messages/@original`, {
+          method: 'PATCH',
+          headers: { Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`, 'content-type': 'application/json' },
+          body: JSON.stringify({ content: 'x' }),
+        });
+        r.followupProbe = probeRes.status; // 401 = auth bad, 404 = auth ok (unknown webhook), other = ?
+      } catch (e) {
+        r.followupProbe = 'fetch-failed: ' + String(e && e.message ? e.message : e).slice(0, 100);
+      }
+      return json(r);
     }
 
     // Discord interactions endpoint
