@@ -1,0 +1,11 @@
+name = "aippy-bot"
+main = "worker.js"
+compatibility_date = "2024-11-01"
+
+# Workers AI binding (chat brain)
+[ai]
+binding = "AI"
+
+# Dashboard alternative: paste worker.js into the online editor and add:
+#  - Binding: Workers AI, variable name "AI"
+#  - Variables: DISCORD_APP_ID, DISCORD_PUBLIC_KEY, DISCORD_BOT_TOKEN
