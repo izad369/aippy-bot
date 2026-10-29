@@ -11,8 +11,8 @@
 
 const API = 'https://discord.com/api/v10';
 
-// /link sign-in codes for the Free Video Generator site (per-isolate, 10-min TTL)
-const linkCodes = new Map(); // code -> {id, un, exp}
+// /link sign-in codes for the Free Video Generator site — stored in a Durable Object
+// (per-isolate Maps die between requests; the DO is the single source of truth)
 
 const HELP_TEXT = [
   '**Aippy Bot** — made by the Aippy developer team ✨',
@@ -186,6 +186,17 @@ function imageUrl(prompt, size) {
   );
 }
 
+async function doPut(env, code, rec) {
+  const stub = env.LINK_DO.get(env.LINK_DO.idFromName('global'));
+  const r = await stub.fetch('https://do/put', { method: 'POST', body: JSON.stringify({ code, ...rec }) });
+  if (!r.ok) throw new Error('do put failed: ' + r.status);
+}
+async function doTake(env, code) {
+  const stub = env.LINK_DO.get(env.LINK_DO.idFromName('global'));
+  const r = await stub.fetch('https://do/take?code=' + encodeURIComponent(code));
+  return r.json();
+}
+
 // ── router ───────────────────────────────────────────────────────────
 export default {
   async fetch(req, env, ctx) {
@@ -277,16 +288,14 @@ export default {
     // site calls this to exchange a /link code for identity (code = one-time bearer, 8 random chars)
     if (req.method === 'GET' && url.pathname === '/link/lookup') {
       const code = (url.searchParams.get('code') || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-      const rec = linkCodes.get(code);
-      if (!rec) return json({ found: false });
-      linkCodes.delete(code); // one-time use
-      if (rec.exp < Date.now()) return json({ found: false });
-      return json({ found: true, id: rec.id, un: rec.un });
+      if (code.length < 4 || code.length > 12) return json({ found: false });
+      const out = await doTake(env, code);
+      return json(out);
     }
 
     // TEMP dev hook for e2e test (removed in next push)
     if (req.method === 'GET' && url.pathname === '/link/devseed') {
-      linkCodes.set('TEST7777', { id: '000000000000000042', un: 'TestPilot', exp: Date.now() + 10 * 60000 });
+      await doPut(env, 'TEST7777', { id: '000000000000000042', un: 'TestPilot', exp: Date.now() + 10 * 60000 });
       return json({ seeded: 'TEST-7777' });
     }
 
@@ -347,17 +356,16 @@ export default {
             .map((b) => '23456789ABCDEFGHJKMNPQRSTUVWXYZ'[b % 31])
             .join('');
           const pretty = `${raw.slice(0, 4)}-${raw.slice(4)}`;
-          linkCodes.set(raw, {
+          const rec = {
             id: u.id || '0',
             un: u.global_name || u.username || 'Discord user',
             exp: Date.now() + 10 * 60000,
-          });
-          if (linkCodes.size > 300) {
-            const now = Date.now();
-            for (const [k, v] of linkCodes) {
-              if (v.exp < now || linkCodes.size > 250) linkCodes.delete(k);
-              if (linkCodes.size <= 250) break;
-            }
+          };
+          try {
+            await doPut(env, raw, rec);
+          } catch (e) {
+            console.error('link doPut failed', e.message);
+            return json({ type: 4, data: { flags: 64, content: '⚠️ Could not create a code right now — try again in a moment.' } });
           }
           return json({
             type: 4,
@@ -440,3 +448,25 @@ export default {
     return json({ error: 'not found' }, 404);
   },
 };
+
+/* Durable Object: durable storage for /link sign-in codes (SQLite-backed, free plan) */
+export class LinkStore {
+  constructor(state) { this.state = state; }
+  async fetch(req) {
+    const u = new URL(req.url);
+    if (req.method === 'POST' && u.pathname === '/put') {
+      const { code, id, un, exp } = await req.json();
+      await this.state.storage.put(String(code).slice(0, 16), { id: String(id), un: String(un), exp: Number(exp) });
+      return new Response('ok');
+    }
+    if (u.pathname === '/take') {
+      const code = (u.searchParams.get('code') || '').slice(0, 16);
+      const rec = await this.state.storage.get(code);
+      if (!rec) return Response.json({ found: false });
+      await this.state.storage.delete(code); // one-time use
+      if (!rec.exp || rec.exp < Date.now()) return Response.json({ found: false });
+      return Response.json({ found: true, id: rec.id, un: rec.un });
+    }
+    return new Response('not found', { status: 404 });
+  }
+}
