@@ -293,34 +293,6 @@ export default {
       return json(out);
     }
 
-    // TEMP dev hook for e2e test (removed in next push)
-    if (req.method === 'GET' && url.pathname === '/link/devseed') {
-      await doPut(env, 'TEST7777', { id: '000000000000000042', un: 'TestPilot', exp: Date.now() + 10 * 60000 });
-      return json({ seeded: 'TEST-7777' });
-    }
-
-    // TEMP probe: verify whether PATCH /applications/@me really persists redirect_uris (removed in next push)
-    if (req.method === 'GET' && url.pathname === '/admin/oauth-check') {
-      if (!env.OAUTH_SECRET || url.searchParams.get('key') !== env.OAUTH_SECRET) return json({ error: 'forbidden' }, 403);
-      const H = { Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`, 'content-type': 'application/json' };
-      const ru = 'https://free-video-generator.rezaei-reza1092.workers.dev/api/auth/callback';
-      const g1 = await fetch(`${API}/applications/@me`, { headers: H });
-      const before = await g1.text();
-      const p = await fetch(`${API}/applications/@me`, { method: 'PATCH', headers: H, body: JSON.stringify({ redirect_uris: [ru] }) });
-      const patchBody = await p.text();
-      const g2 = await fetch(`${API}/applications/@me`, { headers: H });
-      const after = await g2.text();
-      return json({
-        beforeHasRedirect: /redirect/i.test(before),
-        beforeRedirectField: (before.match(/"redirect[^,}]*/g) || []).slice(0, 3),
-        patchStatus: p.status,
-        patchRedirectField: (patchBody.match(/"redirect[^,}]*/g) || []).slice(0, 3),
-        afterHasRedirect: /redirect/i.test(after),
-        afterRedirectField: (after.match(/"redirect[^,}]*/g) || []).slice(0, 3),
-        keysBefore: (before.match(/"[a-z_]+":/g) || []).slice(0, 60),
-      });
-    }
-
     // Discord interactions endpoint
     if (req.method === 'POST' && url.pathname === '/interactions') {
       const rawBody = await req.text();
