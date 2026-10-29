@@ -11,12 +11,16 @@
 
 const API = 'https://discord.com/api/v10';
 
+// /link sign-in codes for the Free Video Generator site (per-isolate, 10-min TTL)
+const linkCodes = new Map(); // code -> {id, un, exp}
+
 const HELP_TEXT = [
   '**Aippy Bot** — made by the Aippy developer team ✨',
   '',
   '`/ask <message>` — chat with me (I answer in your language)',
   '`/image <prompt> [size]` — generate an AI picture (free, no API key)',
   '`/help` — show this message',
+  '`/link` — get a sign-in code for the Free Video Generator site',
   '',
   '_Always online · free · built with love by the Aippy team._',
 ].join('\n');
@@ -74,6 +78,11 @@ const COMMANDS = [
     ],
   },
   { name: 'help', description: 'How to use Aippy Bot · راهنما', type: 1 },
+  {
+    name: 'link',
+    description: 'Get a sign-in code for the Free Video Generator site · کد ورود به سایت ویدیو',
+    type: 1,
+  },
 ];
 
 // ── helpers ──────────────────────────────────────────────────────────
@@ -265,6 +274,44 @@ export default {
       return json(r);
     }
 
+    // site calls this to exchange a /link code for identity (code = one-time bearer, 8 random chars)
+    if (req.method === 'GET' && url.pathname === '/link/lookup') {
+      const code = (url.searchParams.get('code') || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const rec = linkCodes.get(code);
+      if (!rec) return json({ found: false });
+      linkCodes.delete(code); // one-time use
+      if (rec.exp < Date.now()) return json({ found: false });
+      return json({ found: true, id: rec.id, un: rec.un });
+    }
+
+    // TEMP dev hook for e2e test (removed in next push)
+    if (req.method === 'GET' && url.pathname === '/link/devseed') {
+      linkCodes.set('TEST7777', { id: '000000000000000042', un: 'TestPilot', exp: Date.now() + 10 * 60000 });
+      return json({ seeded: 'TEST-7777' });
+    }
+
+    // TEMP probe: verify whether PATCH /applications/@me really persists redirect_uris (removed in next push)
+    if (req.method === 'GET' && url.pathname === '/admin/oauth-check') {
+      if (!env.OAUTH_SECRET || url.searchParams.get('key') !== env.OAUTH_SECRET) return json({ error: 'forbidden' }, 403);
+      const H = { Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`, 'content-type': 'application/json' };
+      const ru = 'https://free-video-generator.rezaei-reza1092.workers.dev/api/auth/callback';
+      const g1 = await fetch(`${API}/applications/@me`, { headers: H });
+      const before = await g1.text();
+      const p = await fetch(`${API}/applications/@me`, { method: 'PATCH', headers: H, body: JSON.stringify({ redirect_uris: [ru] }) });
+      const patchBody = await p.text();
+      const g2 = await fetch(`${API}/applications/@me`, { headers: H });
+      const after = await g2.text();
+      return json({
+        beforeHasRedirect: /redirect/i.test(before),
+        beforeRedirectField: (before.match(/"redirect[^,}]*/g) || []).slice(0, 3),
+        patchStatus: p.status,
+        patchRedirectField: (patchBody.match(/"redirect[^,}]*/g) || []).slice(0, 3),
+        afterHasRedirect: /redirect/i.test(after),
+        afterRedirectField: (after.match(/"redirect[^,}]*/g) || []).slice(0, 3),
+        keysBefore: (before.match(/"[a-z_]+":/g) || []).slice(0, 60),
+      });
+    }
+
     // Discord interactions endpoint
     if (req.method === 'POST' && url.pathname === '/interactions') {
       const rawBody = await req.text();
@@ -292,6 +339,33 @@ export default {
 
         if (name === 'help') {
           return json({ type: 4, data: { content: HELP_TEXT } });
+        }
+
+        if (name === 'link') {
+          const u = (it.member && it.member.user) || it.user || {};
+          const raw = Array.from(crypto.getRandomValues(new Uint8Array(8)))
+            .map((b) => '23456789ABCDEFGHJKMNPQRSTUVWXYZ'[b % 31])
+            .join('');
+          const pretty = `${raw.slice(0, 4)}-${raw.slice(4)}`;
+          linkCodes.set(raw, {
+            id: u.id || '0',
+            un: u.global_name || u.username || 'Discord user',
+            exp: Date.now() + 10 * 60000,
+          });
+          if (linkCodes.size > 300) {
+            const now = Date.now();
+            for (const [k, v] of linkCodes) {
+              if (v.exp < now || linkCodes.size > 250) linkCodes.delete(k);
+              if (linkCodes.size <= 250) break;
+            }
+          }
+          return json({
+            type: 4,
+            data: {
+              flags: 64,
+              content: `🎮 Your **Free Video Generator** sign-in code:\n\n# ${pretty}\n\nOpen the site → "Have a code?" → type it → Go. Valid 10 minutes, works once.\n_Only you can see this message._`,
+            },
+          });
         }
 
         if (name === 'ask') {
