@@ -265,6 +265,37 @@ export default {
       return json(r);
     }
 
+    // one-shot OAuth redirect-URI registration (key-protected; token never leaves the worker)
+    if (req.method === 'GET' && url.pathname === '/admin/oauth-setup') {
+      const key = url.searchParams.get('key') || '';
+      const expected = env.OAUTH_SECRET || '';
+      if (!expected || key !== expected) return json({ error: 'forbidden' }, 403);
+      const ru = url.searchParams.get('ru') || 'https://free-video-generator.rezaei-reza1092.workers.dev/api/auth/callback';
+      const H = { Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`, 'content-type': 'application/json' };
+      const results = [];
+      // 0) read current app object (shape reference, safe fields only)
+      try {
+        const res = await fetch(`${API}/applications/@me`, { headers: H });
+        const txt = await res.text();
+        results.push({ name: 'GET /applications/@me', status: res.status, body: clip(txt, 400) });
+      } catch (e) { results.push({ name: 'GET /applications/@me', error: String(e.message).slice(0, 120) }); }
+      const tries = [
+        { name: 'PATCH @me redirect_uris[str]', method: 'PATCH', path: `${API}/applications/@me`, body: { redirect_uris: [ru] } },
+        { name: 'PATCH id redirect_uris[str]', method: 'PATCH', path: `${API}/applications/${env.DISCORD_APP_ID}`, body: { redirect_uris: [ru] } },
+        { name: 'PUT id/redirect-uris[str]', method: 'PUT', path: `${API}/applications/${env.DISCORD_APP_ID}/redirect-uris`, body: [ru] },
+        { name: 'PUT id/redirect-uris[obj]', method: 'PUT', path: `${API}/applications/${env.DISCORD_APP_ID}/redirect-uris`, body: [{ uri: ru }] },
+        { name: 'POST id/redirect-uris', method: 'POST', path: `${API}/applications/${env.DISCORD_APP_ID}/redirect-uris`, body: { uri: ru } },
+      ];
+      for (const t of tries) {
+        try {
+          const res = await fetch(t.path, { method: t.method, headers: H, body: JSON.stringify(t.body) });
+          const txt = await res.text();
+          results.push({ name: t.name, status: res.status, body: clip(txt, 200) });
+        } catch (e) { results.push({ name: t.name, error: String(e.message).slice(0, 120) }); }
+      }
+      return json({ ru, results });
+    }
+
     // Discord interactions endpoint
     if (req.method === 'POST' && url.pathname === '/interactions') {
       const rawBody = await req.text();
